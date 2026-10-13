@@ -56,6 +56,12 @@ public struct MessageRow: Codable, Hashable, Identifiable {
 
     public enum Kind: String, Codable, Hashable {
         case text
+        /// A formatted or card-bearing reply — `messages.kind = 'rich'`, the
+        /// most common non-text kind on a visitor thread (every bot card is
+        /// one). It was missing, and `init(from:)` below swallows an unknown
+        /// kind as `.text`, so a host app branching on `kind` could not tell
+        /// a product grid from a sentence.
+        case rich
         case image
         case file
         case event

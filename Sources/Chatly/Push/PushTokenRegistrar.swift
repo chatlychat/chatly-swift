@@ -77,57 +77,26 @@ public extension Chatly {
     /// the response is a `UNTextInputNotificationResponse`.
     ///
     /// The `conversationId` is read from the push payload's top-level
-    /// `conversationId` key (see backend handler).
+    /// `conversationId` key (see the worker's push handler).
+    ///
+    /// ── Why this goes through `replyTo` now ────────────────────────────────
+    ///
+    /// It used to build its own request: `{ conversationId, body, kind }` with
+    /// an `Authorization: Bearer <session token>` header and no `publicId` or
+    /// `visitorToken` in the body. Three things wrong with that, each on its
+    /// own fatal — `widgetReplySchema` REQUIRES `publicId` and `visitorToken`,
+    /// and the widget surface has never read an `Authorization` header. So
+    /// every inline notification reply this SDK has ever sent was a 400, and
+    /// the published docs listed the method as working.
+    ///
+    /// Routing it through the client's one choke point also buys it the
+    /// `Idempotency-Key` and the stale-session replay, which matters more here
+    /// than anywhere else: a push reply is the one call a visitor makes after
+    /// the app has been in the background long enough for the token to have
+    /// been refused.
     @discardableResult
     func handleNotificationReply(conversationId: String, text: String) async throws -> [String: Any] {
-        return try await sendNotificationReply(conversationId: conversationId, body: text)
+        let message = try await replyTo(conversationId: conversationId, body: text)
+        return Chatly.rawObject(message)
     }
-
-    private func sendNotificationReply(conversationId: String, body: String) async throws -> [String: Any] {
-        // Reuse the existing widget message endpoint shape; an explicit
-        // conversationId is included so the server routes to the existing
-        // thread instead of opening a new one.
-        return try await postJSON("/v1/widget/messages", body: [
-            "conversationId": conversationId,
-            "body": body,
-            "kind": "text",
-        ])
-    }
-
-    private func postJSON(_ path: String, body: [String: Any]) async throws -> [String: Any] {
-        // Mirrors `Chatly.post(_:body:)` but kept here so the Push module can
-        // remain self-contained. We deliberately do NOT capture the private
-        // `config`/`session` from Chatly.swift — instead we resolve them via
-        // a shared bootstrap helper.
-        return try await ChatlyRequest.post(path, body: body)
-    }
-}
-
-/// Internal helper that bridges the push extension back to the core Chatly
-/// URLSession + base URL without exposing those as public surface. Kept
-/// intentionally minimal — anything more complex belongs back in Chatly.swift.
-enum ChatlyRequest {
-    static func post(_ path: String, body: [String: Any]) async throws -> [String: Any] {
-        let baseURL = ChatlyBootstrap.baseURL
-        guard let base = baseURL else { throw ChatlyError.notConfigured }
-        var req = URLRequest(url: base.appendingPathComponent(path))
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let token = ChatlyBootstrap.sessionToken {
-            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        }
-        req.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw ChatlyError.http(status: (resp as? HTTPURLResponse)?.statusCode ?? -1)
-        }
-        return (try JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
-    }
-}
-
-/// Captures the configured base URL + contact session at SDK configure-time
-/// so the Push module can use them without touching Chatly's private state.
-public enum ChatlyBootstrap {
-    public internal(set) static var baseURL: URL?
-    public internal(set) static var sessionToken: String?
 }

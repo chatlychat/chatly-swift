@@ -41,7 +41,16 @@ public final class ChatlyViewController: UIViewController {
 
     private var conversationId: String?
     private var kbResults: [KbResult] = []
-    private var searchTask: Task<Void, Never>?
+    private var helpTask: Task<Void, Never>?
+
+    /// Called when the visitor taps a Help row, with the fetched article.
+    ///
+    /// The SDK does not render an article — there is no reader view in this
+    /// package and inventing one is a product decision, not a wiring fix. The
+    /// row tap used to `_ = try? await getKbArticle(slug:)` and throw the
+    /// result away, which was a request for nothing. Now the fetch happens
+    /// only when a host has somewhere to put it.
+    public var onSelectHelpArticle: ((KbArticle) -> Void)?
 
     /// Designated initializer.
     public init(theme: ChatlyTheme, workspaceName: String = "Chatly") {
@@ -75,9 +84,8 @@ public final class ChatlyViewController: UIViewController {
 
     public override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        // Route every realtime envelope through our handler, then open the
-        // socket. Setting the closure before connecting avoids missing the
-        // race with `replay.completed` after reconnect.
+        // Route every realtime envelope through our handler FIRST, so a
+        // socket that connects immediately cannot deliver into a nil closure.
         Chatly.shared.onRealtimeEvent = { [weak self] envelope in
             // Transport delivers off-main; bounce to the main thread before
             // touching UIKit.
@@ -85,7 +93,13 @@ public final class ChatlyViewController: UIViewController {
                 self?.handleRealtimeEnvelope(envelope)
             }
         }
-        _ = Chatly.shared.connectRealtime()
+        // Only connects if we already know a conversation. The visitor
+        // realtime token names ONE conversation, so there is nothing to
+        // subscribe to before there is a thread — `adopt(conversationId:)`
+        // opens the socket the moment there is.
+        if let conversationId = conversationId {
+            adopt(conversationId: conversationId)
+        }
     }
 
     public override func viewDidDisappear(_ animated: Bool) {
@@ -232,6 +246,11 @@ public final class ChatlyViewController: UIViewController {
         composer.onUploadRequested = { data, filename, mimeType in
             return try await Chatly.shared.uploadAttachment(data, filename: filename, mimeType: mimeType)
         }
+        // The composer has always reported this and nothing was listening, so
+        // the agent never saw a "customer is typing" chip from an iOS visitor.
+        composer.onTypingChange = { typing in
+            Chatly.shared.setTyping(typing)
+        }
     }
 
     private func installHelpContent() {
@@ -251,20 +270,28 @@ public final class ChatlyViewController: UIViewController {
                 await MainActor.run {
                     self.workspaceName = init_.workspace.name
                     self.titleLabel.text = init_.workspace.name
-                    // [Chatly.connectRealtime()] depends on the cached contact
-                    // id set by [initSession]. Retry once now that we have it
-                    // in case the [viewDidAppear] attempt was a no-op.
-                    if Chatly.shared.onRealtimeEvent != nil {
-                        _ = Chatly.shared.connectRealtime()
-                    }
                 }
                 let convs = try await Chatly.shared.listConversations(limit: 1)
                 if let first = convs.first {
-                    self.conversationId = first.id
                     let messages = try await Chatly.shared.listMessages(conversationId: first.id, limit: 50)
                     await MainActor.run {
                         self.messagesView.setMessages(messages)
+                        // Opening the socket is what makes the thread live,
+                        // and it needs the id — so it happens here rather
+                        // than in `viewDidAppear`, which runs before we have
+                        // one.
+                        self.adopt(conversationId: first.id)
                     }
+                }
+                // An empty query is the BROWSE list — `searchKb` answers with
+                // the most recently published articles when `query` is blank.
+                // Without this the Help tab's only row was its own empty
+                // state, forever, and `getKbArticle` was unreachable because
+                // no row ever existed to tap.
+                let articles = try await Chatly.shared.searchKb(query: "")
+                await MainActor.run {
+                    self.kbResults = articles
+                    self.helpView.reloadData()
                 }
             } catch {
                 // Silently degrade — the UI still functions for a fresh visitor.
@@ -344,7 +371,6 @@ public final class ChatlyViewController: UIViewController {
                     body: text,
                     attachments: attachments.isEmpty ? nil : attachments
                 )
-                self.conversationId = started.conversation.id
                 let optimistic = MessageRow(
                     id: started.message.id,
                     authorType: .contact,
@@ -353,11 +379,29 @@ public final class ChatlyViewController: UIViewController {
                     attachments: attachments,
                     createdAt: started.message.createdAt
                 )
-                await MainActor.run { self.messagesView.append(optimistic) }
+                await MainActor.run {
+                    self.messagesView.append(optimistic)
+                    // The first message is also what makes realtime possible:
+                    // until a conversation exists there is nothing for a
+                    // conversation-scoped token to name.
+                    self.adopt(conversationId: started.conversation.id)
+                }
             } catch {
                 // No-op — user can retry.
             }
         }
+    }
+
+    /// Point the view — and the socket — at one conversation.
+    ///
+    /// Idempotent, and the only place `conversationId` is assigned. A switch
+    /// re-mints and reconnects rather than reusing the socket, because the
+    /// realtime token names a single conversation and a reused socket keeps
+    /// delivering the previous one's events.
+    private func adopt(conversationId: String) {
+        self.conversationId = conversationId
+        guard Chatly.shared.onRealtimeEvent != nil else { return }
+        Chatly.shared.connectRealtime(conversationId: conversationId)
     }
 
     // MARK: Tabs
@@ -416,10 +460,13 @@ extension ChatlyViewController: UITableViewDataSource, UITableViewDelegate {
     public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         guard indexPath.row < kbResults.count else { return }
+        guard let handler = onSelectHelpArticle else { return }
         let slug = kbResults[indexPath.row].slug
-        Task {
-            _ = try? await Chatly.shared.getKbArticle(slug: slug)
-            // Article rendering is left to host apps for now.
+        helpTask?.cancel()
+        helpTask = Task { [weak self] in
+            guard let article = try? await Chatly.shared.getKbArticle(slug: slug) else { return }
+            _ = self
+            await MainActor.run { handler(article) }
         }
     }
 }

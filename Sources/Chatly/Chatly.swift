@@ -32,6 +32,14 @@ public final class Chatly {
         public let channelPublicId: String
         public let baseURL: URL
         public let appURL: URL
+        /// Where the Socket.IO gateway lives, when you need to override it.
+        ///
+        /// `nil` — the default — means "use what `POST /v1/widget/init`
+        /// reports", which is the per-region `realtimeUrl` the server already
+        /// sends. Only a deployment whose gateway is somewhere neither this
+        /// nor the `api.` → `realtime.` convention finds needs to set it. Same
+        /// precedence as the browser widget's `resolveRealtimeUrl`.
+        public let realtimeURL: URL?
         /// Production by default.
         ///
         /// These were `api.chatly.example` and `app.chatly.example` — reserved
@@ -41,21 +49,49 @@ public final class Chatly {
         /// customer who integrated from the docs alone.
         public init(channelPublicId: String,
                     baseURL: URL = URL(string: "https://api.chatlychat.com")!,
-                    appURL: URL = URL(string: "https://app.chatlychat.com")!) {
+                    appURL: URL = URL(string: "https://app.chatlychat.com")!,
+                    realtimeURL: URL? = nil) {
             self.channelPublicId = channelPublicId
             self.baseURL = baseURL
             self.appURL = appURL
+            self.realtimeURL = realtimeURL
         }
     }
 
     public static let shared = Chatly()
 
-    private var config: Config?
+    internal var config: Config?
     /// Injectable so tests can drive the request path through a `URLProtocol`
     /// stub. Production always uses `URLSession.shared`.
     internal var urlSession: URLSession = .shared
     /// Injectable for the same reason; see ``ChatlySessionStorage``.
     internal var storage: ChatlySessionStorage = KeychainSessionStorage()
+    /// Injectable so a test can read the handshake frames the SDK sends.
+    /// Production always opens a real `URLSessionWebSocketTask`.
+    internal var webSocketFactory: ChatlyWebSocketFactory = URLSessionWebSocketFactory()
+    /// Injectable so a test's reconnect does not sleep.
+    internal var realtimeBackoff: (Int) -> TimeInterval = SocketTransport.defaultBackoff
+
+    /// Every realtime envelope for the connected conversation. **Delivered off
+    /// the main thread** — bounce before touching UIKit.
+    public var onRealtimeEvent: ((RealtimeEnvelope) -> Void)?
+
+    internal var realtime: SocketTransport?
+    /// The conversation the open socket is scoped to. The realtime token names
+    /// ONE conversation, so switching means mint-and-reconnect rather than
+    /// reusing the socket — a reused socket keeps delivering the old
+    /// conversation's events.
+    internal var realtimeConversationId: String?
+
+    /// The thread ``send(_:)`` continues, and the default for
+    /// ``connectRealtime(conversationId:)``. Set by `startConversation`,
+    /// `replyTo` and `listConversations`.
+    internal var currentConversationId: String?
+    /// From the last `init`. `message.read` is refused by the gateway unless
+    /// `readerId` equals the token's own contact, so the client has to know it.
+    internal var sessionContactId: String?
+    /// `init`'s own `realtimeUrl`. See ``Config/realtimeURL`` for precedence.
+    internal var sessionRealtimeURL: String?
 
     /// The signed visitor session credential. Sent in the JSON body of every
     /// widget call — the widget surface has never read an `Authorization`
@@ -78,10 +114,8 @@ public final class Chatly {
 
     public func configure(_ config: Config) {
         self.config = config
-        ChatlyBootstrap.baseURL = config.baseURL
         let restored = storage.read(Chatly.tokenKey(config.channelPublicId))
         self.visitorToken = restored
-        ChatlyBootstrap.sessionToken = restored
         self.rememberedIdentity = Chatly.decodeIdentity(
             storage.read(Chatly.identityKey(config.channelPublicId))
         )
@@ -109,6 +143,9 @@ public final class Chatly {
     /// Drops the remembered identity too: after a logout, a stale-session
     /// recovery must NOT quietly re-identify as the person who just signed out.
     public func reset() {
+        disconnectRealtime()
+        currentConversationId = nil
+        sessionContactId = nil
         dropToken()
         rememberedIdentity = nil
         if let cfg = config {
@@ -143,9 +180,26 @@ public final class Chatly {
         return try await post("/v1/widget/events", body: ["name": name, "properties": properties])
     }
 
+    /// Send a message as this visitor, opening a thread if there is not one.
+    ///
+    /// This posted `{ body, kind }` to `POST /v1/widget/messages` and nothing
+    /// else, and that endpoint's schema (`widgetReplySchema`) REQUIRES
+    /// `conversationId` — so every call 400'd, and there was no method on this
+    /// client that would have given you an id to pass. `kind` was dropped by
+    /// zod on the way in, which is why the failure was about the missing id
+    /// rather than the surplus key.
+    ///
+    /// It now continues ``currentConversationId`` when there is one and starts
+    /// a conversation when there is not, which is what a chat SDK's `send`
+    /// means on a device that has exactly one visitor.
     @discardableResult
     public func send(_ body: String) async throws -> [String: Any] {
-        return try await post("/v1/widget/messages", body: ["body": body, "kind": "text"])
+        if let conversationId = currentConversationId {
+            let message = try await replyTo(conversationId: conversationId, body: body)
+            return Chatly.rawObject(message)
+        }
+        let started = try await startConversation(body: body)
+        return Chatly.rawObject(started)
     }
 
     public func registerPushToken(_ deviceToken: Data) async throws {
@@ -157,7 +211,7 @@ public final class Chatly {
     // MARK: - Transport
 
     @discardableResult
-    private func post(_ path: String, body: [String: Any]) async throws -> [String: Any] {
+    internal func post(_ path: String, body: [String: Any]) async throws -> [String: Any] {
         let data = try await postData(path, body: body)
         return ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any]) ?? [:]
     }
@@ -176,6 +230,8 @@ public final class Chatly {
         let data = try await postData("/v1/widget/init", body: body)
         let parsed = try JSONDecoder().decode(InitResponse.self, from: data)
         store(token: parsed.session.token)
+        sessionContactId = parsed.session.contactId
+        sessionRealtimeURL = parsed.realtimeUrl
         if let identity, identity.userHash != nil {
             remember(identity: identity)
         }
@@ -193,7 +249,7 @@ public final class Chatly {
     ///     bound recovery to a single attempt. A second refusal is a real
     ///     error and is thrown.
     @discardableResult
-    private func postData(_ path: String,
+    internal func postData(_ path: String,
                           body: [String: Any],
                           idempotencyKey: String? = nil,
                           isRetry: Bool = false) async throws -> Data {
@@ -260,7 +316,6 @@ public final class Chatly {
     private func store(token: String) {
         guard !token.isEmpty, let cfg = config else { return }
         visitorToken = token
-        ChatlyBootstrap.sessionToken = token
         storage.write(token, forKey: Chatly.tokenKey(cfg.channelPublicId))
     }
 
@@ -269,7 +324,6 @@ public final class Chatly {
     /// otherwise the next launch repeats the failure.
     private func dropToken() {
         visitorToken = nil
-        ChatlyBootstrap.sessionToken = nil
         if let cfg = config {
             storage.delete(Chatly.tokenKey(cfg.channelPublicId))
         }
@@ -292,9 +346,22 @@ public final class Chatly {
         return try? JSONDecoder().decode(WidgetIdentity.self, from: data)
     }
 
-    private static func jsonObject(_ identity: WidgetIdentity) throws -> [String: Any] {
-        let data = try JSONEncoder().encode(identity)
+    /// `Encodable` → the JSON object shape a request body needs.
+    internal static func jsonObject<T: Encodable>(_ value: T) throws -> [String: Any] {
+        let data = try JSONEncoder().encode(value)
         return ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any]) ?? [:]
+    }
+
+    /// `Encodable` → an array of JSON objects, for `attachments`.
+    internal static func jsonArray<T: Encodable>(_ values: [T]) throws -> [[String: Any]] {
+        let data = try JSONEncoder().encode(values)
+        return ((try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]]) ?? []
+    }
+
+    /// Best-effort `Encodable` → `[String: Any]` for the legacy methods whose
+    /// published return type is the raw JSON body.
+    internal static func rawObject<T: Encodable>(_ value: T) -> [String: Any] {
+        return (try? jsonObject(value)) ?? [:]
     }
 
     /// Does this 403 mean "your session token is no good", as opposed to any

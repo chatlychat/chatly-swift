@@ -55,6 +55,18 @@ final class SessionRecoveryTests: XCTestCase {
         return storage
     }
 
+    /// A `MessageRow`, which is what `POST /v1/widget/messages` answers with.
+    ///
+    /// These tests used to drive recovery through `send(_:)` and assert on
+    /// `{"ok":true}`. `send` posted to that route with no `conversationId` and
+    /// therefore 400'd in production on every call, so the path it took was
+    /// never a real one; they go through `replyTo` now, which is.
+    private let messageReply = """
+    {"id":"0190a5d0-7c3a-7000-8000-00000000m001","authorType":"contact",
+    "kind":"text","body":"hello","attachments":[],
+    "createdAt":"2026-05-28T12:00:00.000Z"}
+    """
+
     private func initPayload(token: String) -> String {
         """
         {"session":{"token":"\(token)","contactId":"c-1","workspaceId":"w-1",
@@ -75,11 +87,11 @@ final class SessionRecoveryTests: XCTestCase {
             sends += 1
             return sends == 1
                 ? (403, #"{"code":"visitor_session_upgrade_required"}"#)
-                : (200, #"{"ok":true}"#)
+                : (200, messageReply)
         }
 
         let client = makeClient(storage: storage)
-        _ = try await client.send("hello")
+        _ = try await client.replyTo(conversationId: "cv-1", body: "hello")
 
         // Exactly two calls to the original endpoint, one init wedged between.
         XCTAssertEqual(StubURLProtocol.calls.map(\.path),
@@ -117,7 +129,7 @@ final class SessionRecoveryTests: XCTestCase {
             sends += 1
             return sends == 1
                 ? (403, #"{"code":"visitor_session_invalid"}"#)
-                : (200, #"{"ok":true}"#)
+                : (200, #"{"tracked":true}"#)
         }
 
         let client = makeClient(storage: storage)
@@ -152,7 +164,9 @@ final class SessionRecoveryTests: XCTestCase {
         StubURLProtocol.handler = { _ in (403, #"{"code":"widget_origin_not_allowed"}"#) }
 
         let client = makeClient(storage: storage)
-        await XCTAssertThrowsErrorAsync(try await client.send("hello")) { error in
+        await XCTAssertThrowsErrorAsync(
+            try await client.replyTo(conversationId: "cv-1", body: "hello")
+        ) { error in
             guard case ChatlyError.http(let status) = error else {
                 return XCTFail("expected ChatlyError.http, got \(error)")
             }
@@ -174,7 +188,9 @@ final class SessionRecoveryTests: XCTestCase {
         }
 
         let client = makeClient(storage: storage)
-        await XCTAssertThrowsErrorAsync(try await client.send("hello"))
+        await XCTAssertThrowsErrorAsync(
+            try await client.replyTo(conversationId: "cv-1", body: "hello")
+        )
         XCTAssertEqual(StubURLProtocol.calls.filter { $0.path == "/v1/widget/messages" }.count, 2)
     }
 
@@ -183,7 +199,9 @@ final class SessionRecoveryTests: XCTestCase {
         StubURLProtocol.handler = { _ in (500, #"{"code":"visitor_session_invalid"}"#) }
 
         let client = makeClient(storage: storage)
-        await XCTAssertThrowsErrorAsync(try await client.send("hello"))
+        await XCTAssertThrowsErrorAsync(
+            try await client.replyTo(conversationId: "cv-1", body: "hello")
+        )
         XCTAssertEqual(StubURLProtocol.calls.count, 1)
     }
 
@@ -224,6 +242,22 @@ final class StubURLProtocol: URLProtocol {
         let path: String
         let body: [String: Any]
         let idempotencyKey: String?
+        /// Recorded so a test can assert on a request that is NOT JSON — the
+        /// presigned upload PUT is the raw bytes of the file.
+        let method: String
+        let headers: [String: String]
+        let rawBody: Data
+        /// Full URL, because the presigned PUT goes to S3 rather than to the
+        /// API host and `path` alone cannot tell them apart.
+        let url: URL?
+
+        /// Header names are case-insensitive, and `URLRequest` recapitalises
+        /// the ones it knows — `content-type` comes back as `Content-Type`,
+        /// so a literal subscript on the name we SET finds nothing.
+        func header(_ name: String) -> String? {
+            let wanted = name.lowercased()
+            return headers.first { $0.key.lowercased() == wanted }?.value
+        }
     }
 
     /// `(status, jsonBody)` for a given request.
@@ -245,7 +279,11 @@ final class StubURLProtocol: URLProtocol {
         let call = Call(
             path: request.url?.path ?? "",
             body: ((try? JSONSerialization.jsonObject(with: raw)) as? [String: Any]) ?? [:],
-            idempotencyKey: request.value(forHTTPHeaderField: "Idempotency-Key")
+            idempotencyKey: request.value(forHTTPHeaderField: "Idempotency-Key"),
+            method: request.httpMethod ?? "",
+            headers: request.allHTTPHeaderFields ?? [:],
+            rawBody: raw,
+            url: request.url
         )
         StubURLProtocol.calls.append(call)
 
