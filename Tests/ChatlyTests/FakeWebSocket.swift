@@ -129,16 +129,26 @@ func emittedEvent(_ frame: String) -> (name: String, payload: [String: Any])? {
 /// The transport serialises its work on a private queue and `connect()` is
 /// driven from a `Task`, so "the SDK has sent the handshake" is not true the
 /// instant a call returns.
+///
+/// `async` + `Task.sleep`, not `RunLoop.current.run(until:)`. `RunLoop.current`
+/// and `run(until:)` are both `noasync`, and every caller here is an async
+/// test — Swift 5's checking reports "unavailable from asynchronous contexts
+/// … this is an error in Swift 6". Swift 6.3 does not warn, so it is
+/// invisible locally and only the mirror CI's older toolchain sees it.
+///
+/// Sleeping also yields the cooperative pool, which spinning a run loop on the
+/// calling thread does not — so the transport's own `Task` can actually make
+/// progress while this waits, which is the entire point of the helper.
 func waitUntil(_ description: String,
                timeout: TimeInterval = 2,
                file: StaticString = #filePath,
                line: UInt = #line,
-               _ condition: () -> Bool) {
+               _ condition: () -> Bool) async {
     let deadline = Date().addingTimeInterval(timeout)
     while !condition() {
         if Date() > deadline {
             return XCTFail("timed out waiting for \(description)", file: file, line: line)
         }
-        RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        try? await Task.sleep(nanoseconds: 10_000_000)
     }
 }

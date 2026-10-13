@@ -329,9 +329,9 @@ final class RequestShapeTests: XCTestCase {
         _ = try await client.startConversation(body: "hi")
         XCTAssertTrue(client.connectRealtime())
 
-        waitUntil("a socket to be opened") { factory.sockets.count == 1 }
+        await waitUntil("a socket to be opened") { factory.sockets.count == 1 }
         factory.sockets[0].deliver(FakeSocket.openFrame)
-        waitUntil("the CONNECT frame") { !factory.sockets[0].frames.isEmpty }
+        await waitUntil("the CONNECT frame") { !factory.sockets[0].frames.isEmpty }
 
         let auth = try XCTUnwrap(handshakeAuth(factory.sockets[0].frames[0]))
         XCTAssertEqual(auth["kind"] as? String, "visitor")
@@ -385,13 +385,13 @@ final class RequestShapeTests: XCTestCase {
         _ = try await client.initSession()
 
         XCTAssertTrue(client.connectRealtime(conversationId: "cv-1"))
-        waitUntil("the first socket") { factory.sockets.count == 1 }
+        await waitUntil("the first socket") { factory.sockets.count == 1 }
         XCTAssertTrue(client.connectRealtime(conversationId: "cv-2"))
-        waitUntil("the second socket") { factory.sockets.count == 2 }
+        await waitUntil("the second socket") { factory.sockets.count == 2 }
         XCTAssertTrue(factory.sockets[0].isClosed)
 
         factory.sockets[1].deliver(FakeSocket.openFrame)
-        waitUntil("the second CONNECT frame") { !factory.sockets[1].frames.isEmpty }
+        await waitUntil("the second CONNECT frame") { !factory.sockets[1].frames.isEmpty }
         XCTAssertEqual(handshakeAuth(factory.sockets[1].frames[0])?["token"] as? String, "rt-cv-2")
     }
 
@@ -415,15 +415,15 @@ final class RequestShapeTests: XCTestCase {
         _ = try await client.initSession()
         XCTAssertTrue(client.connectRealtime(conversationId: "cv-1"))
 
-        waitUntil("the first socket") { factory.sockets.count == 1 }
+        await waitUntil("the first socket") { factory.sockets.count == 1 }
         let socket = factory.sockets[0]
         socket.deliver(FakeSocket.openFrame)
-        waitUntil("the CONNECT frame") { socket.frames.count == 1 }
+        await waitUntil("the CONNECT frame") { socket.frames.count == 1 }
         socket.deliver(#"40{"sid":"s1"}"#)
-        waitUntil("the connected state") { client.realtimeState == .connected }
+        await waitUntil("the connected state") { client.realtimeState == .connected }
 
         client.markRead(upToMessageId: "m-1")
-        waitUntil("the read receipt") { socket.frames.count == 2 }
+        await waitUntil("the read receipt") { socket.frames.count == 2 }
         let event = try XCTUnwrap(emittedEvent(socket.frames[1]))
         XCTAssertEqual(event.name, "message.read")
         XCTAssertEqual(event.payload["readerType"] as? String, "contact")

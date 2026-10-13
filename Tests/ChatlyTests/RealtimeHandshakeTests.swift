@@ -41,9 +41,9 @@ final class RealtimeHandshakeTests: XCTestCase {
         let (transport, _) = makeTransport(tokens: ["rt-1"], factory: factory)
 
         await transport.connect()
-        waitUntil("a socket to be opened") { factory.sockets.count == 1 }
+        await waitUntil("a socket to be opened") { factory.sockets.count == 1 }
         factory.sockets[0].deliver(FakeSocket.openFrame)
-        waitUntil("the CONNECT frame") { !factory.sockets[0].frames.isEmpty }
+        await waitUntil("the CONNECT frame") { !factory.sockets[0].frames.isEmpty }
 
         let auth = handshakeAuth(factory.sockets[0].frames[0])
         XCTAssertEqual(auth?["kind"] as? String, "visitor",
@@ -57,9 +57,9 @@ final class RealtimeHandshakeTests: XCTestCase {
         let (transport, _) = makeTransport(tokens: ["rt-minted"], factory: factory)
 
         await transport.connect()
-        waitUntil("a socket to be opened") { factory.sockets.count == 1 }
+        await waitUntil("a socket to be opened") { factory.sockets.count == 1 }
         factory.sockets[0].deliver(FakeSocket.openFrame)
-        waitUntil("the CONNECT frame") { !factory.sockets[0].frames.isEmpty }
+        await waitUntil("the CONNECT frame") { !factory.sockets[0].frames.isEmpty }
 
         XCTAssertEqual(handshakeAuth(factory.sockets[0].frames[0])?["token"] as? String, "rt-minted")
     }
@@ -72,7 +72,7 @@ final class RealtimeHandshakeTests: XCTestCase {
         let (transport, _) = makeTransport(tokens: ["rt-1"], factory: factory)
 
         await transport.connect()
-        waitUntil("a socket to be opened") { factory.sockets.count == 1 }
+        await waitUntil("a socket to be opened") { factory.sockets.count == 1 }
         transport.drain()
         XCTAssertEqual(factory.sockets[0].frames, [],
                        "nothing may be sent before the server's OPEN frame")
@@ -85,17 +85,17 @@ final class RealtimeHandshakeTests: XCTestCase {
         let (transport, mintCount) = makeTransport(tokens: ["rt-1", "rt-2"], factory: factory)
 
         await transport.connect()
-        waitUntil("the first socket") { factory.sockets.count == 1 }
+        await waitUntil("the first socket") { factory.sockets.count == 1 }
         factory.sockets[0].deliver(FakeSocket.openFrame)
-        waitUntil("the first CONNECT frame") { !factory.sockets[0].frames.isEmpty }
+        await waitUntil("the first CONNECT frame") { !factory.sockets[0].frames.isEmpty }
         factory.sockets[0].deliver(#"40{"sid":"s1"}"#)
-        waitUntil("the connected state") { transport.state == .connected }
+        await waitUntil("the connected state") { transport.state == .connected }
 
         // The socket dies after the token's 1h lifetime would have elapsed.
         factory.sockets[0].drop()
-        waitUntil("a second socket") { factory.sockets.count == 2 }
+        await waitUntil("a second socket") { factory.sockets.count == 2 }
         factory.sockets[1].deliver(FakeSocket.openFrame)
-        waitUntil("the second CONNECT frame") { !factory.sockets[1].frames.isEmpty }
+        await waitUntil("the second CONNECT frame") { !factory.sockets[1].frames.isEmpty }
 
         XCTAssertEqual(mintCount(), 2, "every ATTEMPT must mint, not just the first")
         XCTAssertEqual(handshakeAuth(factory.sockets[1].frames[0])?["token"] as? String, "rt-2",
@@ -110,14 +110,14 @@ final class RealtimeHandshakeTests: XCTestCase {
         let (transport, _) = makeTransport(tokens: ["rt-1", "rt-2"], factory: factory)
 
         await transport.connect()
-        waitUntil("the first socket") { factory.sockets.count == 1 }
+        await waitUntil("the first socket") { factory.sockets.count == 1 }
         factory.sockets[0].deliver(FakeSocket.openFrame)
-        waitUntil("the first CONNECT frame") { !factory.sockets[0].frames.isEmpty }
+        await waitUntil("the first CONNECT frame") { !factory.sockets[0].frames.isEmpty }
         factory.sockets[0].deliver(#"44{"message":"Unauthorized"}"#)
 
-        waitUntil("a second socket") { factory.sockets.count == 2 }
+        await waitUntil("a second socket") { factory.sockets.count == 2 }
         factory.sockets[1].deliver(FakeSocket.openFrame)
-        waitUntil("the second CONNECT frame") { !factory.sockets[1].frames.isEmpty }
+        await waitUntil("the second CONNECT frame") { !factory.sockets[1].frames.isEmpty }
         XCTAssertEqual(handshakeAuth(factory.sockets[1].frames[0])?["token"] as? String, "rt-2")
     }
 
@@ -134,10 +134,10 @@ final class RealtimeHandshakeTests: XCTestCase {
             guard factory.sockets.count == attempt + 1 else { break }
             let socket = factory.sockets[attempt]
             socket.deliver(FakeSocket.openFrame)
-            waitUntil("CONNECT frame \(attempt)") { !socket.frames.isEmpty }
+            await waitUntil("CONNECT frame \(attempt)") { !socket.frames.isEmpty }
             socket.deliver(#"44{"message":"Unauthorized"}"#)
             if attempt < 4 {
-                waitUntil("socket \(attempt + 2)") { factory.sockets.count == attempt + 2 }
+                await waitUntil("socket \(attempt + 2)") { factory.sockets.count == attempt + 2 }
             }
         }
         transport.drain()
@@ -149,11 +149,12 @@ final class RealtimeHandshakeTests: XCTestCase {
         let (transport, _) = makeTransport(tokens: ["rt-1"], factory: factory)
 
         await transport.connect()
-        waitUntil("the first socket") { factory.sockets.count == 1 }
+        await waitUntil("the first socket") { factory.sockets.count == 1 }
         transport.disconnect()
         factory.sockets[0].drop()
         transport.drain()
-        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        // Same reason as `waitUntil`: `run(until:)` is noasync and this test is async.
+        try? await Task.sleep(nanoseconds: 100_000_000)
         XCTAssertEqual(factory.sockets.count, 1)
         XCTAssertEqual(transport.state, .disconnected)
     }
@@ -165,12 +166,12 @@ final class RealtimeHandshakeTests: XCTestCase {
         let (transport, _) = makeTransport(tokens: ["rt-1"], factory: factory)
 
         await transport.connect()
-        waitUntil("the first socket") { factory.sockets.count == 1 }
+        await waitUntil("the first socket") { factory.sockets.count == 1 }
         let socket = factory.sockets[0]
         socket.deliver(FakeSocket.openFrame)
-        waitUntil("the CONNECT frame") { socket.frames.count == 1 }
+        await waitUntil("the CONNECT frame") { socket.frames.count == 1 }
         socket.deliver("2")
-        waitUntil("the PONG") { socket.frames.count == 2 }
+        await waitUntil("the PONG") { socket.frames.count == 2 }
         XCTAssertEqual(socket.frames[1], "3",
                        "a client that never pongs is dropped one pingTimeout later")
     }
@@ -182,17 +183,17 @@ final class RealtimeHandshakeTests: XCTestCase {
         transport.onEnvelope = { received.value = $0 }
 
         await transport.connect()
-        waitUntil("the first socket") { factory.sockets.count == 1 }
+        await waitUntil("the first socket") { factory.sockets.count == 1 }
         let socket = factory.sockets[0]
         socket.deliver(FakeSocket.openFrame)
-        waitUntil("the CONNECT frame") { socket.frames.count == 1 }
+        await waitUntil("the CONNECT frame") { socket.frames.count == 1 }
         socket.deliver(#"40{"sid":"s1"}"#)
         socket.deliver(
             #"42["event",{"v":1,"type":"message.created","id":"0190a5d0-7c3a-7000-8000-000000000001","#
             + #""ts":1716835200000,"workspace_id":"0190a5d0-7c3a-7000-8000-000000000002","#
             + #""payload":{"body":"hi"}}]"#
         )
-        waitUntil("the envelope") { received.value != nil }
+        await waitUntil("the envelope") { received.value != nil }
         XCTAssertEqual(received.value?.type, .messageCreated)
     }
 
@@ -206,10 +207,10 @@ final class RealtimeHandshakeTests: XCTestCase {
         transport.onEnvelope = { received.value = $0 }
 
         await transport.connect()
-        waitUntil("the first socket") { factory.sockets.count == 1 }
+        await waitUntil("the first socket") { factory.sockets.count == 1 }
         let socket = factory.sockets[0]
         socket.deliver(FakeSocket.openFrame)
-        waitUntil("the CONNECT frame") { socket.frames.count == 1 }
+        await waitUntil("the CONNECT frame") { socket.frames.count == 1 }
         socket.deliver(#"40{"sid":"s1"}"#)
         socket.deliver(#"42["envelope",{"v":1,"type":"message.created","id":"a","ts":1,"workspace_id":"w","payload":{}}]"#)
         transport.drain()
@@ -221,19 +222,19 @@ final class RealtimeHandshakeTests: XCTestCase {
         let (transport, _) = makeTransport(tokens: ["rt-1"], factory: factory)
 
         await transport.connect()
-        waitUntil("the first socket") { factory.sockets.count == 1 }
+        await waitUntil("the first socket") { factory.sockets.count == 1 }
         let socket = factory.sockets[0]
         socket.deliver(FakeSocket.openFrame)
-        waitUntil("the CONNECT frame") { socket.frames.count == 1 }
+        await waitUntil("the CONNECT frame") { socket.frames.count == 1 }
 
         transport.emit("message.read", payload: ["conversationId": "c-1"])
         transport.drain()
         XCTAssertEqual(socket.frames.count, 1, "nothing may be queued against an unconnected socket")
 
         socket.deliver(#"40{"sid":"s1"}"#)
-        waitUntil("the connected state") { transport.state == .connected }
+        await waitUntil("the connected state") { transport.state == .connected }
         transport.emit("message.read", payload: ["conversationId": "c-1"])
-        waitUntil("the emitted read") { socket.frames.count == 2 }
+        await waitUntil("the emitted read") { socket.frames.count == 2 }
         XCTAssertEqual(emittedEvent(socket.frames[1])?.name, "message.read")
     }
 

@@ -205,11 +205,33 @@ public final class SocketTransport {
             pendingAuth = ["token": token, "kind": "visitor"]
             socket = factory.open(
                 url: Self.handshakeURL(realtimeURL),
+                /*
+                 * `guard let self` ONCE per callback, not `self?` twice.
+                 *
+                 * The two-`self?` form captures the weak var itself into the
+                 * inner closure, which Swift 5's concurrency checking reports
+                 * as "reference to captured var 'self' in concurrently-
+                 * executing code; this is an error in Swift 6". Swift 6.3
+                 * does not warn, so it is invisible locally and only the
+                 * mirror CI (macos-14, an older toolchain) sees it.
+                 *
+                 * It is also a real difference in behaviour: with two
+                 * optional chains, `self` can be non-nil when the callback
+                 * fires and deallocated by the time the queue drains, so the
+                 * inner call is silently dropped. Binding once holds it for
+                 * the duration of the hop, which is what the handler assumes.
+                 */
                 onText: { [weak self] text in
-                    self?.queue.async { self?.handleLocked(text: text, generation: generationForThisAttempt) }
+                    guard let self else { return }
+                    self.queue.async {
+                        self.handleLocked(text: text, generation: generationForThisAttempt)
+                    }
                 },
                 onClose: { [weak self] error in
-                    self?.queue.async { self?.handleCloseLocked(error: error, generation: generationForThisAttempt) }
+                    guard let self else { return }
+                    self.queue.async {
+                        self.handleCloseLocked(error: error, generation: generationForThisAttempt)
+                    }
                 }
             )
         }
