@@ -54,19 +54,32 @@ public struct MessageRow: Codable, Hashable, Identifiable {
         case contact, agent, bot, system
     }
 
-    public enum Kind: String, Codable, Hashable {
+    /// What shape the body is.
+    ///
+    /// Four cases, and the set used to be wrong in both directions. `image`,
+    /// `file`, `event` and `internal_note` were cases here and are not
+    /// members of the server's `message_kind` enum
+    /// (`text | rich | note | system_event | attachment_only`), so nothing
+    /// could ever decode to them — while `rich` and `system_event` were
+    /// absent. `init(from:)` below swallows an unknown kind as `.text`, which
+    /// is what made the gap invisible: every card arrived looking like a
+    /// sentence.
+    ///
+    /// `note` is deliberately absent, and that narrowing is the correct one:
+    /// an agent's internal comment never reaches a visitor. The realtime
+    /// gateway's `VISITOR_VISIBLE_MESSAGE_KINDS` excludes it, and so does the
+    /// history route's SQL — which additionally excludes `system_event`, so
+    /// that one arrives live and is gone after a reload.
+    public enum Kind: String, Codable, Hashable, CaseIterable {
         case text
         /// A formatted or card-bearing reply — `messages.kind = 'rich'`, the
         /// most common non-text kind on a visitor thread (every bot card is
-        /// one). It was missing, and `init(from:)` below swallows an unknown
-        /// kind as `.text`, so a host app branching on `kind` could not tell
-        /// a product grid from a sentence.
+        /// one). Render `blocks` when it is present.
         case rich
-        case image
-        case file
-        case event
         case attachmentOnly = "attachment_only"
-        case internalNote = "internal_note"
+        /// The platform's own audit turn. Arrives on the socket; the history
+        /// route does not serve it.
+        case systemEvent = "system_event"
     }
 
     private enum CodingKeys: String, CodingKey {

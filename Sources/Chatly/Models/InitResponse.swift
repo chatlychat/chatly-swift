@@ -122,7 +122,26 @@ public struct PresignResponse: Codable, Hashable {
 
 /// Identity payload sent to `init`. Mirrors the widget `WidgetIdentity` type.
 public struct WidgetIdentity: Codable, Hashable {
-    public let externalId: String
+    /// The customer's own id for this person.
+    ///
+    /// OPTIONAL, because an email-only identity is a coherent thing to send
+    /// and the server accepts one: `widgetInitSchema`'s `externalId` is
+    /// `.optional()` and its `.refine` admits `email` alone, with a docblock
+    /// saying the change was made *because* "every SDK we ship advertises an
+    /// email-only `identify({ email })`".
+    ///
+    /// It used to be a non-optional `String`, so this type could not express
+    /// the call its own SDK advertises. `identify` built the identity only
+    /// inside `if let externalId`, and an app passing a nil id with a real
+    /// email sent NO identity key at all — email, name, `userHash` and
+    /// attributes all discarded client-side, after a 200. The agent inbox
+    /// showed an unnamed stranger with no reply address.
+    ///
+    /// An email-only claim can never be *verified*: `userHash` binds the
+    /// external id alone, deliberately, so there is nothing to bind. The
+    /// session stays unverified and, on an IDV channel, still cannot perform
+    /// the profile writes a verified one may.
+    public let externalId: String?
     public let email: String?
     public let name: String?
     /// HMAC signature when identity verification is enabled.
@@ -130,7 +149,7 @@ public struct WidgetIdentity: Codable, Hashable {
     public let attributes: [String: AnyCodable]?
 
     public init(
-        externalId: String,
+        externalId: String? = nil,
         email: String? = nil,
         name: String? = nil,
         userHash: String? = nil,

@@ -75,6 +75,32 @@ public extension Chatly {
         return page.conversations
     }
 
+    /// `POST /v1/widget/conversations/{id}/read` — persist how far the
+    /// visitor has read.
+    ///
+    /// The DURABLE half of a read receipt, and none of the four mobile SDKs
+    /// had it: only the web widget ever called this route. All four render
+    /// the unread badge from the server's own `unreadContactCount`, so
+    /// without this the count could only go UP — it survived app restarts and
+    /// the agent inbox never learned a native visitor had seen the thread.
+    ///
+    /// Distinct from `markRead(upToMessageId:)` in `Chatly+Realtime`, which
+    /// emits the live "Read ✓" tick over the socket. That is advisory and
+    /// goes with the connection; this is the row.
+    ///
+    /// `upToMessageId` is optional server-side — omitting it means "read as
+    /// of now", which is what an app that does not track per-message
+    /// visibility should send.
+    @discardableResult
+    func persistRead(conversationId: String? = nil,
+                     upToMessageId: String? = nil) async throws -> Bool {
+        guard let target = conversationId ?? currentConversationId else { return false }
+        var payload: [String: Any] = [:]
+        if let upToMessageId { payload["upToMessageId"] = upToMessageId }
+        _ = try await post("/v1/widget/conversations/\(target)/read", body: payload)
+        return true
+    }
+
     /// `POST /v1/widget/messages/list` — one thread's messages, oldest first.
     /// Answers `{ messages: [...] }`. 404s on a conversation this visitor does
     /// not own.

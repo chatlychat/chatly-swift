@@ -51,14 +51,24 @@ final class ClientTests: XCTestCase {
         XCTAssertEqual(decoded, conv)
     }
 
+    /// Every kind the server can send a visitor, decoded from its wire string.
+    ///
+    /// This list used to be `text`, `image`, `file`, `event`, `internal_note`
+    /// — and four of those five are not members of the server's
+    /// `message_kind` enum at all, so the test proved only that the SDK
+    /// agreed with itself. `rich`, the kind every formatted reply and every
+    /// bot card carries, was in neither the enum nor this list.
     func testMessageRowDecodesAllKinds() throws {
         let kinds: [(String, MessageRow.Kind)] = [
             ("text", .text),
-            ("image", .image),
-            ("file", .file),
-            ("event", .event),
-            ("internal_note", .internalNote),
+            ("rich", .rich),
+            ("attachment_only", .attachmentOnly),
+            ("system_event", .systemEvent),
         ]
+        // The floor: four, so a list that loses entries fails here rather
+        // than passing over a shorter loop.
+        XCTAssertGreaterThanOrEqual(kinds.count, 4)
+        XCTAssertEqual(Set(kinds.map { $0.0 }), Set(MessageRow.Kind.allCases.map(\.rawValue)))
         for (raw, expected) in kinds {
             let json = """
             {

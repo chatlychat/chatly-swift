@@ -159,16 +159,33 @@ public final class Chatly {
                          name: String? = nil,
                          userHash: String? = nil,
                          attributes: [String: Any] = [:]) async throws -> [String: Any] {
-        var identity: WidgetIdentity?
-        if let externalId {
-            identity = WidgetIdentity(
+        /*
+         * Built when ANY field was supplied, not only when `externalId` was.
+         *
+         * This was `if let externalId { … }`, so an app calling
+         * `identify(externalId: user.id, email: user.email)` with a nil `id`
+         * sent no `identity` key whatsoever and the email, name, `userHash`
+         * and attributes were all thrown away client-side. The server has
+         * accepted an email-only identity deliberately since
+         * `widgetInitSchema`'s `externalId` became optional — and the reason
+         * recorded there is that every SDK advertises `identify({ email })`.
+         *
+         * `nil` only when the caller supplied nothing at all, which is a
+         * no-op identify and should stay one rather than send an empty
+         * object the server would have to interpret.
+         */
+        let hasAnything =
+            externalId != nil || email != nil || name != nil || userHash != nil
+                || !attributes.isEmpty
+        let identity: WidgetIdentity? = hasAnything
+            ? WidgetIdentity(
                 externalId: externalId,
                 email: email,
                 name: name,
                 userHash: userHash,
                 attributes: attributes.isEmpty ? nil : attributes.mapValues { AnyCodable($0) }
             )
-        }
+            : nil
         // No `/v1/widget/identify` route has ever existed — identity goes to
         // `init`, which is also where verified-identity hashing is checked.
         let (_, raw) = try await initSessionReturningRaw(identity: identity)
