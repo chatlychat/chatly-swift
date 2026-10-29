@@ -52,6 +52,17 @@ public final class ChatlyViewController: UIViewController {
     /// only when a host has somewhere to put it.
     public var onSelectHelpArticle: ((KbArticle) -> Void)?
 
+    /// Called when the visitor presses a button on a rich block — a card's
+    /// "Buy now", an `actions` entry, a grid's "Show all 60".
+    ///
+    /// This is the hook a card's `host_event` exists for: "Pay $48.20" has to
+    /// run a payment sheet with the buyer's real session, which is the app's
+    /// own code. `postback` and `step` arrive here too and are not sent
+    /// anywhere by the SDK — this client has no postback or canvas transport,
+    /// and mapping a postback onto a visitor message would put words in the
+    /// visitor's mouth. A `url` is opened by the SDK as well as reported.
+    public var onBlockAction: ((ChatlyBlockAction) -> Void)?
+
     /// Designated initializer.
     public init(theme: ChatlyTheme, workspaceName: String = "Chatly") {
         self.theme = theme
@@ -242,6 +253,15 @@ public final class ChatlyViewController: UIViewController {
         composer.presenter = self
         composer.onSend = { [weak self] text, attachments in
             self?.handleComposerSend(text, attachments: attachments)
+        }
+        messagesView.onBlockAction = { [weak self] action in
+            self?.onBlockAction?(action)
+        }
+        // A quick reply IS an ordinary visitor message, so it goes down the
+        // composer's own path: same send, same optimistic append, same
+        // conversation-or-start branch.
+        messagesView.onQuickReply = { [weak self] value in
+            self?.handleComposerSend(value, attachments: [])
         }
         composer.onUploadRequested = { data, filename, mimeType in
             return try await Chatly.shared.uploadAttachment(data, filename: filename, mimeType: mimeType)

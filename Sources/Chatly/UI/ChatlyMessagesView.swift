@@ -14,6 +14,17 @@ public final class ChatlyMessagesView: UIView, UITableViewDataSource, UITableVie
     private var messages: [MessageRow] = []
     private var theme: ChatlyTheme
 
+    /// Every rich-block action the visitor presses, from any row.
+    ///
+    /// Set once on the view rather than per cell, because a cell is recycled
+    /// and a closure captured per row would outlive the row it was made for.
+    /// See ``ChatlyBlocksView/onAction`` for what this SDK runs itself.
+    public var onBlockAction: ((ChatlyBlockAction) -> Void)?
+
+    /// A pressed quick reply's value. ``ChatlyViewController`` sends it down
+    /// the same path as a message the visitor typed, which is what it is.
+    public var onQuickReply: ((String) -> Void)?
+
     /// Creates the view with the supplied visual theme.
     public init(theme: ChatlyTheme) {
         self.theme = theme
@@ -98,6 +109,8 @@ public final class ChatlyMessagesView: UIView, UITableViewDataSource, UITableVie
         let cell = tableView.dequeueReusableCell(withIdentifier: ChatlyMessageCell.reuseIdentifier,
                                                  for: indexPath)
         guard let chatCell = cell as? ChatlyMessageCell else { return cell }
+        chatCell.onBlockAction = { [weak self] action in self?.onBlockAction?(action) }
+        chatCell.onQuickReply = { [weak self] value in self?.onQuickReply?(value) }
         chatCell.configure(with: messages[indexPath.row], theme: theme)
         return chatCell
     }

@@ -14,15 +14,30 @@ public final class ChatlyMessageCell: UITableViewCell {
     private let bubble = UIView()
     private let bodyLabel = UILabel()
     private let attachmentsStack = UIStackView()
+    /// The `rich` message's blocks — a card, a product grid, a fulfilment
+    /// timeline. Collapses to nothing on a message that carries none.
+    private let blocksView = ChatlyBlocksView()
+    private var blocksTop: NSLayoutConstraint?
     private let metaLabel = UILabel()
     private var leadingConstraint: NSLayoutConstraint?
     private var trailingConstraint: NSLayoutConstraint?
-    /// Lightweight in-memory cache so we don't re-download the same thumbnail
-    /// each time a cell scrolls back into view.
-    private static let imageCache = NSCache<NSString, UIImage>()
     /// Token used to discard stale fetches when the cell is reconfigured
     /// before the previous download finished.
     private var currentLoadID = UUID()
+
+    /// Every block action the visitor presses. Forwarded by
+    /// ``ChatlyMessagesView``; see ``ChatlyBlocksView/onAction`` for what this
+    /// SDK can and cannot run itself.
+    public var onBlockAction: ((ChatlyBlockAction) -> Void)? {
+        get { blocksView.onAction }
+        set { blocksView.onAction = newValue }
+    }
+
+    /// A pressed quick reply's value, to be sent as a visitor message.
+    public var onQuickReply: ((String) -> Void)? {
+        get { blocksView.onQuickReply }
+        set { blocksView.onQuickReply = newValue }
+    }
 
     public override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
@@ -55,9 +70,14 @@ public final class ChatlyMessageCell: UITableViewCell {
         attachmentsStack.distribution = .fill
         bubble.addSubview(attachmentsStack)
 
+        bubble.addSubview(blocksView)
+
         metaLabel.translatesAutoresizingMaskIntoConstraints = false
         metaLabel.font = .systemFont(ofSize: 11)
         contentView.addSubview(metaLabel)
+
+        let blocksTop = blocksView.topAnchor.constraint(equalTo: attachmentsStack.bottomAnchor)
+        self.blocksTop = blocksTop
 
         NSLayoutConstraint.activate([
             bubble.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 6),
@@ -70,7 +90,11 @@ public final class ChatlyMessageCell: UITableViewCell {
             attachmentsStack.topAnchor.constraint(equalTo: bodyLabel.bottomAnchor, constant: 6),
             attachmentsStack.leadingAnchor.constraint(equalTo: bubble.leadingAnchor, constant: 12),
             attachmentsStack.trailingAnchor.constraint(equalTo: bubble.trailingAnchor, constant: -12),
-            attachmentsStack.bottomAnchor.constraint(equalTo: bubble.bottomAnchor, constant: -8),
+
+            blocksTop,
+            blocksView.leadingAnchor.constraint(equalTo: bubble.leadingAnchor, constant: 12),
+            blocksView.trailingAnchor.constraint(equalTo: bubble.trailingAnchor, constant: -12),
+            blocksView.bottomAnchor.constraint(equalTo: bubble.bottomAnchor, constant: -8),
 
             metaLabel.topAnchor.constraint(equalTo: bubble.bottomAnchor, constant: 2),
             metaLabel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -6),
@@ -81,6 +105,9 @@ public final class ChatlyMessageCell: UITableViewCell {
         super.prepareForReuse()
         currentLoadID = UUID()
         attachmentsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        // A reused cell must not show the previous row's card while the new
+        // row's `configure` is still being called.
+        blocksView.render(nil, theme: ChatlyTheme())
     }
 
     /// Renders `row` into the cell using the supplied `theme`.
@@ -108,6 +135,11 @@ public final class ChatlyMessageCell: UITableViewCell {
             let view = makeAttachmentView(attachment: attachment, theme: theme, isOutbound: isOutbound)
             attachmentsStack.addArrangedSubview(view)
         }
+
+        // `kind` is NOT the gate: the envelope is on the row or it is not, and
+        // a message whose kind an older build fell back to `.text` can still
+        // carry blocks. The reader answers with nothing when there is nothing.
+        blocksTop?.constant = blocksView.render(row.blocks, theme: theme) ? 6 : 0
 
         leadingConstraint?.isActive = false
         trailingConstraint?.isActive = false
@@ -193,22 +225,16 @@ public final class ChatlyMessageCell: UITableViewCell {
         return container
     }
 
+    /// Fetch through ``ChatlyImageLoader``, which holds the one cache an
+    /// attachment thumbnail and a card image now share. The staleness token
+    /// stays here: only this cell reuses its views.
     private func loadImage(url: URL, into imageView: UIImageView) {
-        let key = url.absoluteString as NSString
-        if let cached = Self.imageCache.object(forKey: key) {
-            imageView.image = cached
-            return
-        }
         let token = UUID()
         currentLoadID = token
-        URLSession.shared.dataTask(with: url) { [weak self, weak imageView] data, _, _ in
-            guard let data = data, let image = UIImage(data: data) else { return }
-            Self.imageCache.setObject(image, forKey: key)
-            DispatchQueue.main.async {
-                guard let self = self, self.currentLoadID == token else { return }
-                imageView?.image = image
-            }
-        }.resume()
+        ChatlyImageLoader.load(url) { [weak self, weak imageView] image in
+            guard let self = self, self.currentLoadID == token else { return }
+            imageView?.image = image
+        }
     }
 
     private static func formatSize(_ bytes: Int) -> String {

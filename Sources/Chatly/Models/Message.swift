@@ -35,19 +35,31 @@ public struct MessageRow: Codable, Hashable, Identifiable {
     public let body: String
     public let attachments: [Attachment]
     public let createdAt: String
+    /// The rich-block envelope, exactly as stored — `{ v: 1, blocks: [...] }`.
+    ///
+    /// UNVALIDATED and loosely typed on purpose, matching `MessageRow.blocks`
+    /// in the React Native SDK. Validation happens at RENDER time, in
+    /// ``ChatlyBlocks/read(_:)``: a server newer than this app will send block
+    /// types it has never heard of, and the rule is to render what can be
+    /// drawn rather than to refuse the message. Decoded with `try?` for the
+    /// same reason — a malformed value here can never fail the decode of the
+    /// message that carries it.
+    public let blocks: AnyCodable?
 
     public init(id: String,
                 authorType: AuthorType,
                 kind: Kind,
                 body: String,
                 attachments: [Attachment] = [],
-                createdAt: String) {
+                createdAt: String,
+                blocks: AnyCodable? = nil) {
         self.id = id
         self.authorType = authorType
         self.kind = kind
         self.body = body
         self.attachments = attachments
         self.createdAt = createdAt
+        self.blocks = blocks
     }
 
     public enum AuthorType: String, Codable, Hashable {
@@ -74,7 +86,17 @@ public struct MessageRow: Codable, Hashable, Identifiable {
         case text
         /// A formatted or card-bearing reply — `messages.kind = 'rich'`, the
         /// most common non-text kind on a visitor thread (every bot card is
-        /// one). Render `blocks` when it is present.
+        /// one). Render ``MessageRow/blocks`` when it is present.
+        ///
+        /// That sentence was a lie until 2026-10-27: this type had no
+        /// `blocks` property and the field was absent from `CodingKeys`, so
+        /// the envelope was DROPPED at decode and every card, product grid
+        /// and fulfilment timeline arrived as bare `body` text with no error.
+        /// It is now read by ``ChatlyBlocks/read(_:)`` and drawn by
+        /// ``ChatlyBlocksView`` — all twelve block types the web widget and
+        /// the React Native SDK render, minus the two spatial fields
+        /// (`card.model`, `card_grid.placement`) that only a 3D world host
+        /// reads. See ``ChatlyBlock`` for that subset.
         case rich
         case attachmentOnly = "attachment_only"
         /// The platform's own audit turn. Arrives on the socket; the history
@@ -83,7 +105,7 @@ public struct MessageRow: Codable, Hashable, Identifiable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, authorType, kind, body, attachments, createdAt
+        case id, authorType, kind, body, attachments, createdAt, blocks
     }
 
     public init(from decoder: Decoder) throws {
@@ -96,5 +118,8 @@ public struct MessageRow: Codable, Hashable, Identifiable {
         self.body = try c.decode(String.self, forKey: .body)
         self.attachments = (try? c.decode([Attachment].self, forKey: .attachments)) ?? []
         self.createdAt = try c.decode(String.self, forKey: .createdAt)
+        // `try?`, not `decodeIfPresent`: whatever shape a newer server (or an
+        // importer) put here must not fail the message around it.
+        self.blocks = try? c.decode(AnyCodable.self, forKey: .blocks)
     }
 }

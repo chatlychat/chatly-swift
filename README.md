@@ -44,6 +44,37 @@ try await Chatly.shared.replyTo(
 )
 ```
 
+### Rich blocks
+
+A `rich` message — every bot card, product grid and order-status timeline —
+carries a block envelope in `MessageRow.blocks`. `ChatlyViewController` draws
+it inside the bubble: text, images, field lists, cards (badges, price, stock,
+variants, buttons), card grids and carousels, action buttons, quick replies,
+fulfilment timelines, comparison tables, places, status lines and dividers.
+The two spatial fields (`card.model`, `card_grid.placement`) are read by 3D
+world hosts only and are not drawn here.
+
+Pressed buttons come back to you, because a card's "Pay $48.20" has to run
+with the buyer's real session:
+
+```swift
+controller.onBlockAction = { action in
+    switch action.kind {
+    case .hostEvent: presentPaymentSheet(for: action.value)   // "checkout"
+    case .navigate:  router.go(action.value)                  // "/orders/8841"
+    default: break
+    }
+}
+```
+
+A `url` action is opened by the SDK as well as reported. `postback` and `step`
+are reported and nothing else — this client has no postback or canvas-step
+transport, and sending one as a visitor message would put words in the
+visitor's mouth. Quick replies ARE visitor messages, so the SDK sends those
+itself. To draw blocks in your own UI instead, read the envelope with
+`ChatlyBlocks.read(row.blocks)`; it never throws and drops anything it cannot
+draw, including block types newer than the app.
+
 ## Realtime
 
 ```swift
